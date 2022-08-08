@@ -1,0 +1,468 @@
+# Wave Function Collapse
+
+```elixir
+Mix.install([
+  {:kino, "~> 0.6.1"}
+])
+```
+
+## Wave Funtion Tile Definition
+
+* `WaveFunction` is a bounded context defining the parts of the wave function collapse.
+* `Tile` is intented to be a generic type which does not impose a specific grid implementation
+
+```elixir
+defmodule WaveFunction.Tile do
+  @enforce_keys [:name]
+  defstruct [:name, angle: nil, weight: 1.0, sides: %{}, properties: %{}, rotations: nil]
+
+  @type t :: %__MODULE__{
+          name: String.t(),
+          angle: integer() | nil,
+          weight: float(),
+          sides: %{(side :: String.t()) => side_type :: term()},
+          properties: map(),
+          rotations: [integer(), ...] | nil
+        }
+
+  @doc """
+  Check that tile type is internally consistent
+  """
+  @spec valid?(__MODULE__.t()) :: boolean
+  def valid?(tile) do
+    is_struct(tile, __MODULE__) and
+      valid_name?(tile) and
+      valid_sides?(tile) and
+      valid_rotations?(tile)
+  end
+
+  @spec valid_name?(term()) :: boolean
+  defp valid_name?(%__MODULE__{name: name}) do
+    is_binary(name)
+  end
+
+  @spec valid_sides?(sides :: term()) :: boolean
+  defp valid_sides?(%__MODULE__{sides: sides}) do
+    validate_side_entry = fn {side, side_type} ->
+      is_binary(side) and valid_side?(side_type)
+    end
+
+    is_map(sides) and Enum.all?(sides, validate_side_entry)
+  end
+
+  @spec valid_side?(term()) :: boolean
+  defp valid_side?(side) do
+    is_tuple(side) and Enum.all?(Tuple.to_list(side), &Kernel.is_binary/1)
+  end
+
+  @spec valid_rotations?(term()) :: boolean
+  defp valid_rotations?(%__MODULE__{angle: nil, rotations: nil}), do: true
+
+  defp valid_rotations?(%__MODULE__{angle: a, rotations: rs})
+       when is_integer(a) and is_list(rs),
+       do: Enum.all?(rs, &Kernel.is_integer/1)
+
+  defp valid_rotations?(%__MODULE__{}), do: false
+end
+```
+
+`Tileset` is a behaviour to define the contract between `Tiles` and their implementation.
+
+It should have specific knowledge of the implementation, how the sides are named, how the tile is rotated (if possible), which `Tile`s make up the Tileset
+
+```elixir
+defmodule WaveFunction.Tileset do
+  @doc """
+  Returns all unique tiles in the tileset.
+  """
+  @callback all() :: [WaveFunction.Tile.t()]
+
+  @doc """
+  returns the complement side's name.
+  """
+  @callback to_complement(String.t()) :: String.t()
+
+  @doc """
+  rotates the tile to a specific orientation if possible
+  """
+  @callback rotate(WaveFunction.Tile.t(), integer()) :: WaveFunction.Tile.t()
+end
+```
+
+```elixir
+defmodule WaveFunction.CartesianTileset do
+  alias WaveFunction.{Tile, Tileset}
+  alias WaveFunction.CartesianTileset.{Tundra, Plain}
+
+  @behaviour Tileset
+
+  @type rotations :: 0 | 90 | 180 | 270
+
+  @impl Tileset
+  def all() do
+    [
+      Tundra.new(),
+      Plain.new(),
+      Plain.new_tundra_transition()
+    ]
+  end
+
+  @impl Tileset
+  def to_complement("east"), do: "west"
+  def to_complement("west"), do: "east"
+  def to_complement("south"), do: "north"
+  def to_complement("north"), do: "south"
+
+  @impl Tileset
+  def rotate(tile = %Tile{angle: angle}, angle), do: tile
+
+  def rotate(tile = %Tile{angle: 0, rotations: rs}, angle) do
+    if angle in rs do
+      do_rotate(tile, angle)
+    else
+      raise ArgumentError, "tile cannot be rotated to angle"
+    end
+  end
+
+  defp do_rotate(tile = %Tile{angle: 0}, angle = 90) do
+    %{
+      tile
+      | angle: angle,
+        sides: %{
+          "north" => tile.sides["west"],
+          "south" => tile.sides["east"],
+          "east" => tile.sides["north"],
+          "west" => tile.sides["south"]
+        }
+    }
+  end
+
+  defp do_rotate(tile = %Tile{angle: 0}, angle = 180) do
+    %{
+      tile
+      | angle: angle,
+        sides: %{
+          "north" => tile.sides["south"],
+          "south" => tile.sides["north"],
+          "east" => tile.sides["west"],
+          "west" => tile.sides["east"]
+        }
+    }
+  end
+
+  defp do_rotate(tile = %Tile{angle: 0}, angle = 270) do
+    %{
+      tile
+      | angle: angle,
+        sides: %{
+          "north" => tile.sides["east"],
+          "south" => tile.sides["west"],
+          "east" => tile.sides["south"],
+          "west" => tile.sides["north"]
+        }
+    }
+  end
+end
+```
+
+```elixir
+defmodule WaveFunction.CartesianTileset.Tundra do
+  def default_properties do
+    %{
+      color: "hsl(0, 0%, 95%)"
+    }
+  end
+
+  def default_sides do
+    %{
+      "north" => {"tundra"},
+      "south" => {"tundra"},
+      "east" => {"tundra"},
+      "west" => {"tundra"}
+    }
+  end
+
+  def new() do
+    %WaveFunction.Tile{
+      name: "tundra",
+      weight: 1,
+      properties: default_properties(),
+      sides: default_sides()
+    }
+  end
+end
+```
+
+```elixir
+defmodule WaveFunction.CartesianTileset.Plain do
+  def default_properties do
+    %{}
+  end
+
+  def default_sides do
+    %{
+      "north" => {"plain"},
+      "south" => {"plain"},
+      "east" => {"plain"},
+      "west" => {"plain"}
+    }
+  end
+
+  def new() do
+    %WaveFunction.Tile{
+      name: "plain",
+      weight: 1,
+      properties: default_properties(),
+      sides: default_sides()
+    }
+  end
+
+  def new_tundra_transition() do
+    tile = new()
+
+    %{
+      tile
+      | name: "plain_tundra_transition",
+        weight: 0.5,
+        sides: %{tile.sides | "north" => {"tundra"}},
+        angle: 0,
+        rotations: [0, 90, 180, 270]
+    }
+  end
+end
+```
+
+```elixir
+defmodule WaveFunction.Tiles do
+  alias WaveFunction.{
+    CartesianTileset,
+    Tile
+  }
+
+  def tiles(tileset_type \\ CartesianTileset) do
+    tiles = tileset_type.all()
+
+    :ok = validate_tiles!(tiles)
+    :ok = validate_names!(tiles)
+    :ok = validate_tile_connections!(tiles, tileset_type)
+
+    permute_tiles(tiles)
+  end
+
+  # Permute rotateable tiles to ease generation
+  @spec permute_tiles([Tile.t()], tileset :: atom()) :: [Tile.t()]
+  defp permute_tiles(tiles, tileset_type \\ CartesianTileset) do
+    tiles
+    |> Enum.flat_map(fn tile ->
+      if tile.rotations do
+        Enum.map(tile.rotations, fn rotation ->
+          %{tile | name: "#{tile.name}_#{rotation}"}
+          |> tileset_type.rotate(rotation)
+        end)
+      else
+        [tile]
+      end
+    end)
+  end
+
+  # Check that each tile definition has a unique name
+  @spec validate_names!([Tile.t()]) :: :ok
+  defp validate_names!(tiles) do
+    tiles
+    |> Enum.reduce_while(%{}, fn tile, names ->
+      if names[tile.name] do
+        {:halt, {:duplicate, tile.name}}
+      else
+        {:cont, Map.put(names, tile.name, true)}
+      end
+    end)
+    |> then(fn
+      {:duplicate, name} -> raise "tile definition has duplicate name: " <> name
+      _ -> :ok
+    end)
+  end
+
+  # Check that each tile defined is internally consistent
+  @spec validate_tiles!([term()]) :: :ok
+  defp validate_tiles!(tiles) do
+    Enum.each(tiles, fn tile ->
+      if not Tile.valid?(tile) do
+        raise "invalid tile:\n" <> inspect(tile) <> "\n"
+      end
+    end)
+  end
+
+  # Check that each side's possibilities references an existing tile definition
+  @spec validate_tile_connections!([Tile.t()], tileset_type :: atom()) :: :ok
+  defp validate_tile_connections!(tiles, tileset_type) do
+    tile_side_index = index_tiles_by_edge(tiles)
+
+    Enum.each(tiles, fn tile ->
+      Enum.each(tile.sides, fn {side, side_type} ->
+        if not Map.has_key?(tile_side_index, {tileset_type.to_complement(side), side_type}) do
+          raise "tile side type definition is missing complement side: \n" <>
+                  inspect(tile) <>
+                  "\n" <>
+                  "side: " <>
+                  inspect(side) <>
+                  "\n" <>
+                  "side_type: " <>
+                  inspect(side_type) <>
+                  "\n" <>
+                  "missing_side: " <> inspect(tileset_type.to_complement(side)) <> "\n"
+        end
+      end)
+    end)
+  end
+
+  @spec index_tiles_by_name([Tile.t()]) :: %{String.t() => Tile.t()}
+  def index_tiles_by_name(tiles) do
+    Enum.into(tiles, %{}, &{&1.name, &1})
+  end
+
+  @spec index_tiles_by_edge([Tile.t()]) :: %{{String.t(), term()} => Tile.t()}
+  def index_tiles_by_edge(tiles) do
+    tiles
+    |> Enum.flat_map(fn tile -> Enum.map(tile.sides, &{&1, tile}) end)
+    |> Enum.group_by(&Kernel.elem(&1, 0), &Kernel.elem(&1, 1))
+  end
+end
+```
+
+```elixir
+defs = WaveFunction.Tiles.tiles()
+```
+
+## Wave Function Model
+
+These next modules define the model to perform the super-position possibilities and run the collapsing simulation such that an output is observed.
+
+The goal is to make each step observable within a later display (Kino or otherwise) component
+
+```elixir
+defmodule WaveFunction.Space2D do
+  @type position :: {integer(), integer()}
+end
+```
+
+```elixir
+defmodule WaveFunction.Point2D do
+  alias WaveFunction.{Space2D, Tile}
+
+  @enforce_keys [:x, :y]
+  defstruct [:x, :y, tile_name: nil, possibilities: []]
+
+  @type t :: %__MODULE__{
+          x: integer(),
+          y: integer(),
+          tile_name: String.t() | nil,
+          possibilities: [Tile.t()]
+        }
+
+  @spec get_position(__MODULE__.t()) :: Space2D.position()
+  def get_position(%__MODULE__{x: x, y: y}), do: {y, x}
+
+  def new(x, y) do
+    %__MODULE__{x: x, y: y}
+  end
+
+  def set_possibilities(point = %__MODULE__{}, ps) when is_list(ps) do
+    %{point | possibilities: ps}
+  end
+
+  def set_tile(point = %__MODULE__{}, tile_name) when is_binary(tile_name) do
+    %{point | tile_name: tile_name}
+  end
+end
+```
+
+```elixir
+defmodule WaveFunction.Model do
+  alias WaveFunction.{CartesianTileset, Point2D, Space2D, Tile, Tiles}
+
+  @enforce_keys [:edge_index, :tileset, :tiles, :tile_index]
+  defstruct [
+    :edge_index,
+    :tileset,
+    :tiles,
+    :tile_index,
+    :x_min,
+    :y_min,
+    :x_max,
+    :y_max,
+    space: %{}
+  ]
+
+  @type t :: %__MODULE__{
+          space: %{Space2D.position() => Point2D.t()},
+          tileset: atom(),
+          tiles: [Tile.t()],
+          tile_index: %{String.t() => Tile.t()},
+          edge_index: %{{String.t(), term()} => Tile.t()},
+          x_min: integer(),
+          y_min: integer(),
+          x_max: integer(),
+          y_max: integer()
+        }
+
+  def new(opts \\ []) do
+    with x_max <- Keyword.get(opts, :x_max),
+         y_max <- Keyword.get(opts, :y_max),
+         x_min <- Keyword.get(opts, :y_min, 0),
+         y_min <- Keyword.get(opts, :y_min, 0),
+         tileset <- Keyword.get(opts, :tileset, CartesianTileset),
+         tiles <- Tiles.tiles(tileset),
+         tile_index <- Tiles.index_tiles_by_name(tiles),
+         edge_index <- Tiles.index_tiles_by_edge(tiles) do
+      %__MODULE__{
+        space: create_space(x_min, x_max, y_min, y_max, tiles),
+        x_min: x_min,
+        y_min: y_min,
+        x_max: x_max,
+        y_max: y_max,
+        tileset: tileset,
+        tiles: tiles,
+        tile_index: tile_index,
+        edge_index: edge_index
+      }
+    end
+  end
+
+  defp create_space(x_min, x_max, y_min, y_max, tiles) when x_min < x_max and y_min < y_max do
+    for y <- y_min..y_max,
+        x <- x_min..x_max,
+        into: %{} do
+      {{y, x}, %Point2D{y: y, x: x} |> Point2D.set_possibilities(tiles)}
+    end
+  end
+
+  @doc """
+  Determine if a point or position is in bounds of the model
+  """
+  def in_bounds?(model = %__MODULE__{}, point = %Point2D{}) do
+    do_in_bounds?(model, Point2D.get_position(point))
+  end
+
+  def in_bounds?(model = %__MODULE__{}, position = {_y, _x}) do
+    do_in_bounds?(model, position)
+  end
+
+  defp do_in_bounds?(model, {y, x}) do
+    y in model.y_min..model.y_max and
+      x in model.x_min..model.x_max
+  end
+end
+```
+
+```elixir
+model = WaveFunction.Model.new(x_max: 9, y_max: 9)
+```
+
+## Wave Function Collapser
+
+```elixir
+defmodule WaveFunction.Collapse do
+  def step() do
+  end
+end
+```
